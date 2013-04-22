@@ -113,14 +113,18 @@ class XdrStream:
 
     def decode_opaque(self):
         size = self.decode_int32()
+        padding = (4 - (size & 3)) & 3;
         opaque = self.data[self.index:self.index + size]
-        self.index += size
+        self.index += size + padding
         return opaque
 
     def bytes(self, len):
         data = self.data[self.index:self.index+len]
         self.index += len
         return data
+
+    def decode_string(self):
+        return self.decode_opaque()
 
     def has_more_data(self):
         return self.index < len(self.data)
@@ -159,12 +163,26 @@ def nfs_v3_decode_read(m):
     len = m.decode_int32()
     return fh, offset, len
 
+def nfs_v3_decode_write(m):
+    fh = m.decode_opaque()
+    offset = m.decode_int64()
+    len = m.decode_int32()
+    how = m.decode_int32()
+    data = m.bytes(len)
+    return fh, offset, len
+
+def nfs_v3_decode_create(m):
+    fh = m.decode_opaque()
+    path = m.decode_string()
+    return fh, path
+
 def dump_fh(fh):
     bytes = map(lambda x: '%.2x' % x, map(ord, fh))
     return string.join(bytes, '')
 
 def rpcdecode(rpc_message):
 
+    global hit
     rpc = {}
     rpc['xid'] = rpc_message.decode_int32()
     type = rpc_message.decode_int32()
@@ -173,6 +191,7 @@ def rpcdecode(rpc_message):
     rpc['type'] = message_types[type]
 
     if rpc['type'] == 'CALL':
+
         call = rpc_decode_call(rpc_message)
         if call['rpcvers'] != 2:
             return
@@ -180,11 +199,22 @@ def rpcdecode(rpc_message):
         rpc_decode_auth(rpc_message)
         # verf
         rpc_decode_auth(rpc_message)
+
         if call['prog'] == 100003 and call['vers'] == 3 and call['proc'] == 6:
             fh, offset, len = nfs_v3_decode_read(rpc_message)
-            global hit
             hit += 1
             print hit, dump_fh(fh), offset, len
+
+        if call['prog'] == 100003 and call['vers'] == 3 and call['proc'] == 7:
+            fh, offset, len = nfs_v3_decode_write(rpc_message)
+            hit += 1
+            print hit, dump_fh(fh), offset, len
+
+        if call['prog'] == 100003 and call['vers'] == 3 and call['proc'] == 8:
+            fh, path = nfs_v3_decode_create(rpc_message)
+            hit += 1
+            print hit, dump_fh(fh), path
+
 
 class XdrPump:
     def __init__(self, pcap):
@@ -233,7 +263,6 @@ class RpcStream:
         header = self.xdr.decode_int32()
         len = header & 0x7fffffff
         last_fragment = (header & 0x80000000) != 0
-        print 'last_fragment: ', last_fragment, 'len: ', len, "remaning: ",self.xdr.remaining()
         return last_fragment, self.xdr.bytes(len)
 
 def packet_filter(pktlen, data, timestamp):
